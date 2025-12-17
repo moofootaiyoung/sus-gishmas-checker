@@ -1,0 +1,416 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getAuth, 
+  signInWithCustomToken, 
+  signInAnonymously, 
+  onAuthStateChanged,
+  User 
+} from 'firebase/auth';
+import { 
+  getFirestore, 
+  collection, 
+  addDoc, 
+  doc, 
+  onSnapshot, 
+  serverTimestamp 
+} from 'firebase/firestore';
+import { 
+  Snowflake, 
+  TreePine,
+  Frown,
+  Smile,
+  Candy
+} from 'lucide-react';
+
+// --- Firebase Configuration & Initialization ---
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// --- Types ---
+type SusLevel = 'low' | 'medium' | 'high';
+type Status = 'invited' | 'sus';
+
+interface Guest {
+  id: string;
+  name: string;
+  reason: string;
+  susLevel: SusLevel;
+  status: Status;
+  createdAt: any;
+}
+
+// --- Helper Components ---
+
+const Snowfall = () => {
+  // Simple CSS-only snow effect
+  return (
+    <div className="fixed inset-0 pointer-events-none z-0 overflow-hidden" aria-hidden="true">
+      <div className="absolute top-[-10px] left-[10%] text-white/20 animate-[fall_5s_linear_infinite] text-2xl">❄</div>
+      <div className="absolute top-[-10px] left-[30%] text-white/30 animate-[fall_7s_linear_infinite_1s] text-xl">❅</div>
+      <div className="absolute top-[-10px] left-[70%] text-white/20 animate-[fall_6s_linear_infinite_2s] text-3xl">❆</div>
+      <div className="absolute top-[-10px] left-[50%] text-white/40 animate-[fall_8s_linear_infinite_3s] text-lg">❄</div>
+      <div className="absolute top-[-10px] left-[90%] text-white/30 animate-[fall_5s_linear_infinite_1.5s] text-2xl">❅</div>
+      <style>{`
+        @keyframes fall {
+          0% { transform: translateY(-10px) rotate(0deg); opacity: 0; }
+          20% { opacity: 1; }
+          100% { transform: translateY(100vh) rotate(360deg); opacity: 0; }
+        }
+      `}</style>
+    </div>
+  );
+};
+
+// --- Main Component ---
+export default function SusGuestSorter() {
+  const [user, setUser] = useState<User | null>(null);
+  const [guests, setGuests] = useState<Guest[]>([]);
+  const [loading, setLoading] = useState(true);
+  
+  // Quiz State
+  const [step, setStep] = useState(0); // 0: Intro/Name, 1: Q1, 2: Q2, 3: Q3
+  const [guestName, setGuestName] = useState('');
+  const [q1, setQ1] = useState(0); 
+  const [q2, setQ2] = useState(0); 
+  const [q3, setQ3] = useState(0);
+  
+  // Animation State for Result
+  const [resultAnimation, setResultAnimation] = useState<'pass' | 'sus' | null>(null);
+  
+  const [filter, setFilter] = useState('');
+
+  // 1. Authentication
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (error) {
+        console.error("Auth failed:", error);
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, setUser);
+    return () => unsubscribe();
+  }, []);
+
+  // 2. Data Fetching - This ensures everyone sees the same list
+  useEffect(() => {
+    if (!user) return;
+    // Uses the public 'guests' collection shared by all users of this app
+    const guestsRef = collection(db, 'artifacts', appId, 'public', 'data', 'guests');
+    const unsubscribe = onSnapshot(guestsRef, (snapshot) => {
+      const loadedGuests: Guest[] = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      } as Guest));
+      
+      // Sort by newest first
+      loadedGuests.sort((a, b) => {
+        const tA = a.createdAt?.toMillis() || 0;
+        const tB = b.createdAt?.toMillis() || 0;
+        return tB - tA;
+      });
+
+      setGuests(loadedGuests);
+      setLoading(false);
+    }, (error) => {
+      console.error("Data fetch error:", error);
+      setLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, [user]);
+
+  // --- Actions ---
+
+  const handleNextStep = (score?: number) => {
+    // If a score is passed, save it to the current question state
+    if (step === 1 && score !== undefined) setQ1(score);
+    if (step === 2 && score !== undefined) setQ2(score);
+    if (step === 3 && score !== undefined) {
+      setQ3(score);
+      // We need to trigger the final submission here because state updates are async
+      // Passing the final score directly to the submit function
+      submitVibeCheck(score); 
+    } else {
+      setStep(prev => prev + 1);
+    }
+  };
+
+  const submitVibeCheck = async (finalQ3Score: number) => {
+    if (!user) return;
+
+    const totalScore = q1 + q2 + finalQ3Score;
+
+    let status: Status = 'invited';
+    let susLevel: SusLevel = 'low';
+    let reason = "On the Nice List! 🎄";
+
+    // Logic: If score > 50, they are SUS
+    if (totalScore > 50) {
+      status = 'sus';
+      if (totalScore > 150) susLevel = 'high';
+      else susLevel = 'medium';
+
+      // Generate funny reason (kept for data purposes, though hidden in UI)
+      if (q1 >= 50) reason = "Called the cops on a nap.";
+      if (q2 >= 50 && q2 > q1) reason = "Left a bad singer hanging.";
+      if (finalQ3Score >= 50 && finalQ3Score > q2) reason = "Hated the double-ended gift.";
+    }
+
+    // TRIGGER ANNOYING ANIMATION
+    setResultAnimation(status === 'sus' ? 'sus' : 'pass');
+
+    try {
+      // Saves to the shared public collection
+      await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'guests'), {
+        name: guestName.trim(),
+        reason: reason,
+        susLevel: susLevel,
+        status: status,
+        createdAt: serverTimestamp()
+      });
+      
+      // Reset after animation
+      setTimeout(() => {
+        setResultAnimation(null);
+        setStep(0);
+        setGuestName('');
+        setQ1(0);
+        setQ2(0);
+        setQ3(0);
+      }, 1500); 
+      
+    } catch (err) {
+      console.error("Error adding guest:", err);
+    }
+  };
+
+  // --- Derived State ---
+  const filteredGuests = useMemo(() => {
+    return guests.filter(g => g.name.toLowerCase().includes(filter.toLowerCase()));
+  }, [guests, filter]);
+
+  const susGuests = filteredGuests.filter(g => g.status === 'sus');
+  const invitedGuests = filteredGuests.filter(g => g.status === 'invited');
+
+  // --- Render ---
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-red-700 flex items-center justify-center text-white font-bold text-2xl animate-pulse">
+        <Snowflake className="animate-spin mr-3" /> LOADING GISHMAS SUS TEST...
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-red-700 to-green-900 font-sans p-2 md:p-8 relative selection:bg-green-300 selection:text-green-900 uppercase overflow-x-hidden">
+      <Snowfall />
+
+      {/* ANNOYING RESULT OVERLAY */}
+      {resultAnimation && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-xl">
+           <style>{`
+             @keyframes annoyed-shake {
+               0%, 100% { transform: translateX(0); }
+               10%, 30%, 50%, 70%, 90% { transform: translateX(-10px) rotate(-5deg); color: red; }
+               20%, 40%, 60%, 80% { transform: translateX(10px) rotate(5deg); color: white; }
+             }
+             @keyframes annoyed-spin {
+               0% { transform: rotate(0deg) scale(0.5); filter: hue-rotate(0deg); }
+               50% { transform: rotate(180deg) scale(1.5); }
+               100% { transform: rotate(360deg) scale(0.5); filter: hue-rotate(360deg); }
+             }
+           `}</style>
+           {resultAnimation === 'pass' ? (
+             <h1 className="text-7xl md:text-[12rem] font-black text-center text-green-500 animate-[annoyed-spin_1s_linear_infinite] drop-shadow-[0_0_25px_rgba(34,197,94,0.8)]">
+                PASS!
+             </h1>
+           ) : (
+             <h1 className="text-7xl md:text-[12rem] font-black text-center text-red-600 animate-[annoyed-shake_0.2s_linear_infinite] drop-shadow-[0_0_25px_rgba(220,38,38,0.8)]">
+                SUS!
+             </h1>
+           )}
+        </div>
+      )}
+      
+      <div className="max-w-4xl mx-auto relative z-10">
+        
+        {/* Festive Header */}
+        <header className="mb-4 md:mb-8 text-center mt-4">
+          <div className="inline-block bg-white/90 border-4 border-red-600 shadow-xl p-3 md:p-6 rounded-3xl rotate-1 transform hover:scale-105 transition-transform duration-300 relative overflow-hidden">
+            {/* Candy Cane Stripes CSS */}
+            <div className="absolute top-0 left-0 w-full h-2 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,#ef4444_10px,#ef4444_20px)]"></div>
+            
+            <h1 className="text-3xl md:text-6xl font-black text-red-700 tracking-tighter flex items-center justify-center gap-2 md:gap-4 mt-2 animate-[chaos_0.15s_linear_infinite]">
+              <TreePine className="text-green-600 animate-[bounce_0.3s_infinite]" size={32} />
+              GISHMAS SUS TEST
+              <TreePine className="text-green-600 animate-[bounce_0.3s_infinite] delay-75" size={32} />
+            </h1>
+            <style>{`
+              @keyframes chaos {
+                0% { transform: translate(1px, 1px) rotate(0deg); color: #b91c1c; text-shadow: 4px 4px 0px #15803d; }
+                25% { transform: translate(-2px, -2px) rotate(-2deg) scale(1.05); color: #15803d; text-shadow: -4px 4px 0px #b91c1c; }
+                50% { transform: translate(2px, -1px) rotate(2deg) scale(0.95); color: #b91c1c; text-shadow: -4px -4px 0px #15803d; }
+                75% { transform: translate(-1px, 2px) rotate(-1deg) scale(1.02); color: #15803d; text-shadow: 4px -4px 0px #b91c1c; }
+                100% { transform: translate(1px, -2px) rotate(1deg); color: #b91c1c; text-shadow: 4px 4px 0px #15803d; }
+              }
+            `}</style>
+            
+             <div className="absolute bottom-0 left-0 w-full h-2 bg-[repeating-linear-gradient(45deg,transparent,transparent_10px,#ef4444_10px,#ef4444_20px)]"></div>
+          </div>
+        </header>
+
+        {/* The Click-Through Quiz Wizard */}
+        <div className="bg-white border-4 border-green-700 rounded-3xl p-4 md:p-8 mb-10 shadow-2xl relative">
+          
+          {step === 0 && (
+            <div className="text-center space-y-6 animate-[fadeIn_0.5s_ease-out]">
+              <div className="max-w-md mx-auto">
+                <input
+                  type="text"
+                  value={guestName}
+                  onChange={(e) => setGuestName(e.target.value)}
+                  placeholder="ENTER POTENTIAL GUEST NAME..."
+                  className="w-full text-center text-lg md:text-2xl font-bold bg-transparent border-b-4 border-gray-200 focus:border-red-500 rounded-none px-4 py-4 outline-none transition-all placeholder:text-gray-300 text-gray-800 uppercase"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && guestName.trim()) handleNextStep();
+                  }}
+                />
+              </div>
+              <button
+                onClick={() => handleNextStep()}
+                disabled={!guestName.trim()}
+                className="w-full md:w-auto bg-red-600 hover:bg-red-500 text-white font-black text-xl py-3 px-12 rounded-full transition-all hover:scale-105 shadow-lg disabled:opacity-50 disabled:scale-100 flex items-center justify-center gap-2 mx-auto"
+              >
+                 START CHECK <Candy className="animate-spin-slow" />
+              </button>
+            </div>
+          )}
+
+          {step === 1 && (
+            <div className="text-center space-y-6 animate-[fadeIn_0.5s_ease-out]">
+              <h2 className="text-xl font-bold text-green-700 uppercase">Question 1/3</h2>
+              <h3 className="text-xl md:text-2xl font-black text-gray-800">GUEST TOOK 3 SHOTS AND PASSED OUT ON THE FLOOR, WHAT DO YOU DO:</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <button onClick={() => handleNextStep(100)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-red-500 hover:bg-red-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🚓</div>
+                   <div className="font-bold text-gray-700">CALL THE COPS</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🤣</div>
+                   <div className="font-bold text-gray-700">LAUGH AT THEM AND CALL NAMES</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">💧</div>
+                   <div className="font-bold text-gray-700">GIVE THEM WATER AND PAT THEIR HEAD</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🥚</div>
+                   <div className="font-bold text-gray-700">GIVE THEM EGGNOG TO BOOST HOLIDAY SPIRIT</div>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 2 && (
+            <div className="text-center space-y-6 animate-[fadeIn_0.5s_ease-out]">
+              <h2 className="text-xl font-bold text-green-700 uppercase">Question 2/3</h2>
+              <h3 className="text-xl md:text-2xl font-black text-gray-800">GUEST IS SINGING POORLY AT KARAOKE AND FORGETS ALL THE LYRICS, WHAT DO YOU DO:</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🎤</div>
+                   <div className="font-bold text-gray-700">JOIN & SING WITH THEM</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🥃</div>
+                   <div className="font-bold text-gray-700">GIVE THEM A SHOT</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🍷</div>
+                   <div className="font-bold text-gray-700">TAKE A SHOT BY YOURSELF IN THE CORNER TO MAKE THEIR SINGING SOUND BETTER</div>
+                </button>
+                <button onClick={() => handleNextStep(100)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-red-500 hover:bg-red-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">😐</div>
+                   <div className="font-bold text-gray-700">DO NOTHING</div>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {step === 3 && (
+            <div className="text-center space-y-6 animate-[fadeIn_0.5s_ease-out]">
+              <h2 className="text-xl font-bold text-green-700 uppercase">Question 3/3</h2>
+              <h3 className="text-xl md:text-2xl font-black text-gray-800">I OPEN MY GIFT AND IT'S A DOUBLE EDGED DILDO. MY FACE LOOKS LIKE THIS:</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                <button onClick={() => handleNextStep(100)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-red-500 hover:bg-red-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">☹️</div>
+                   <div className="font-bold text-gray-700">FROWNING</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">😁</div>
+                   <div className="font-bold text-gray-700">SMILING EAR TO EAR</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">📢</div>
+                   <div className="font-bold text-gray-700">I BLACK OUT AND CAN'T INTERPRET MY FACIAL EXPRESSION BECAUSE IM SO HAPPY</div>
+                </button>
+                <button onClick={() => handleNextStep(0)} className="p-4 md:p-6 bg-gray-50 border-2 border-gray-200 hover:border-green-500 hover:bg-green-50 rounded-xl transition-all group active:scale-95">
+                   <div className="text-4xl mb-2 group-hover:scale-110 transition-transform">🙈</div>
+                   <div className="font-bold text-gray-700">CONTAINING MY EXCITEMENT AND I HIDE IT AND HOPE NO ONE REMEMBERS THIS GIFT I GOT SO I CAN USE IT LATER ON MYSELF</div>
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* The Two Lists */}
+        <div className="grid md:grid-cols-2 gap-8 pb-12">
+          
+          {/* THE SUS LIST */}
+          <div className="bg-red-950/40 backdrop-blur-md rounded-3xl p-5 border-4 border-red-600 shadow-xl">
+            <h2 className="text-2xl font-black text-white mb-4 flex items-center gap-2 drop-shadow-md pb-2 border-b border-red-500/30">
+              <Frown className="text-red-400" />
+              THE SUS LIST
+            </h2>
+            
+            <div className="space-y-1">
+              {susGuests.map((guest) => (
+                  <div key={guest.id} className="py-2 px-2 border-b border-red-500/20 last:border-0">
+                    <h3 className="font-black text-xl text-white">{guest.name}</h3>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+          {/* THE PASS LIST */}
+          <div className="bg-green-950/40 backdrop-blur-md rounded-3xl p-5 border-4 border-green-500 shadow-xl">
+            <h2 className="text-2xl font-black text-white mb-4 flex items-center gap-2 drop-shadow-md pb-2 border-b border-green-500/30">
+              <Smile className="text-green-300" />
+              THE PASS LIST
+            </h2>
+
+            <div className="space-y-1">
+              {invitedGuests.map((guest) => (
+                  <div key={guest.id} className="py-2 px-2 border-b border-green-500/20 last:border-0">
+                    <h3 className="font-black text-xl text-white">{guest.name}</h3>
+                  </div>
+                ))}
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
